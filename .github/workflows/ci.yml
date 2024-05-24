@@ -1,0 +1,57 @@
+name: Digest web deployment pipeline
+run-name: ${{ github.actor }} has triggered the pipline
+on: [push]
+jobs:
+  kubernetes:
+    runs-on: [self-hosted, linux, x64, prod]
+    steps:
+      - uses: azure/setup-kubectl@v3
+        name: Install kubectl
+        with:
+          version: "v1.21.0"
+        id: install
+      - uses: actions/checkout@v3
+      - name: Verify staging deployment
+        env:
+          CERTIFICATE: ${{ secrets.EW1K8S2_CA_CRT }}
+          SERVICE_TOKEN: ${{ secrets.K8S_STAGING_TOKEN }}
+          NAMESPACE: sprinters-staging
+          CONTEXT_NAME: context_namespace
+          K8S_SERVER: https://api.ew1k8s2.prod.foundation.meltwater.io
+        run: |
+          echo "Setting up k8s"
+          echo "${CERTIFICATE}" | base64 -d > ca.crt;
+          kubectl config set-cluster ew1k8s2-prod --server=${K8S_SERVER} --certificate-authority=ca.crt --embed-certs=true
+          kubectl config set-credentials script_user --token=${SERVICE_TOKEN}
+          kubectl config set-context ${CONTEXT_NAME} --cluster=ew1k8s2-prod --user=script_user --namespace=${NAMESPACE}
+          kubectl config use-context ${CONTEXT_NAME}
+          kubectl apply --dry-run="server" -f ./k8s/staging/daily-digest-promptfoo.yaml
+      
+  publish-ecr:
+    runs-on: [self-hosted,linux,x64,prod]
+    if: contains(github.event.head_commit.message, '[deploy-staging]') || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 14
+      
+      - name: Configure AWS credentials with Access and Secret Keys (NOT RECOMMENDED)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.aws_access_key_id }}
+          aws-secret-access-key: ${{ secrets.aws_secret_access_key }}
+          aws-region: eu-west-1
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+        with:
+          mask-password: 'true'
+      - name: Build, tag, and push docker image to Amazon ECR
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          REPOSITORY: daily-digest-promptfoo
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build --build-arg NEXT_PUBLIC_PROMPTFOO_BASE_URL=http://localhost:3000 -t $REGISTRY/$REPOSITORY:$IMAGE_TAG .
+          docker push $REGISTRY/$REPOSITORY:$IMAGE_TAG
